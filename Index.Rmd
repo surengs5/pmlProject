@@ -1,0 +1,198 @@
+---
+title: "PML Project - Prediction of Exercise Manner"
+author: "Suren G"
+date: "Friday, January 23, 2015"
+output: html_document
+---
+
+##Introduction
+Availability of devices such as Jawbone Up, Nike FuelBand, and Fitbit allows to capture personal activity of physical movements relatively inexpensively. In this analysis, goal is to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants and predict the manner of exercise of the participants. The participants were asked to perform barbell lifts correctly and incorrectly in 5 different ways.
+
+Downloadable copies of the training and test datasets are available at the following links:
+
+[Training Datafile URL](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv)
+
+[Test Datafile URL](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv)
+
+** **
+
+###Data Source Acknowledgment
+The training and test datasets were made available by Groupware@LES organization.
+
+[GroupwareLES URL](http://groupware.les.inf.puc-rio.br/har)
+
+** **
+
+###Assumptions
+1. Examination of Training and Test case datasets showed they do not have values available for all of the prediction variables. Also the variables which are entirely "NA or blanks or null strings or #DIV/0"" are not exactly common between train and test datasets. For the purpose of this project the variables which have one of the listed values will be excluded, as they should not have any impact on the prediction variable **classe** and will add noise to predict. The list of variables to exclude was driven by the training population, irrespective of the test population, as the training set has more observations and cross validated for model fitness.
+
+2. The training/test HAR data populations contain relevant prediction variables of three categories which are pertinent to "arm", "belt" or "dumbbell" sensors. Any variables other than the sensor specific ones are excluded (i.e, th first seven variables: "X", "user_name", "raw_timestamp_part_1", "raw_timestamp_part_2", "cvtd_timestamp", "new_window", "num_window").
+
+** **
+
+
+```{r loadData, echo = TRUE, message = FALSE, warnings = FALSE, results = 'asis'}
+#Load requisite libraries
+library(knitr, warn.conflicts = FALSE, quietly=TRUE)
+library(plyr, warn.conflicts = FALSE, quietly=TRUE)
+library(dplyr, warn.conflicts = FALSE, quietly=TRUE)
+library(caret, warn.conflicts = FALSE, quietly=TRUE)
+library(randomForest, warn.conflicts = FALSE, quietly=TRUE)
+library(gbm, warn.conflicts = FALSE, quietly=TRUE)
+library(doParallel, warn.conflicts = FALSE, quietly=TRUE)
+
+#Download the requisite train and test data files
+opts_chunk$set(echo = TRUE, results = 'asis', fig.path = "./figures/", cache = TRUE)
+trainFile <- file.path(".", "pml-training.csv")
+download.file("http://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv", trainFile, quiet = TRUE)
+trainDf <- read.csv(trainFile, header = TRUE, na.strings = c("#DIV/0!", "", "NA", " "))
+
+
+#Include only variables which have content by excluding exclusive NA values
+# and other non sensor variables (e.g. X, user_name etc)
+trainDf <- trainDf[ , -c(1:7)]
+includeVar <- names(trainDf[ , !(sapply(trainDf, function(x) sum(is.na(x))))])
+trainDf <- trainDf[ , c(includeVar)]
+
+testFile <- file.path(".", "pml-testing.csv")
+download.file("http://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv", testFile, quiet = TRUE)
+testDf <- read.csv(testFile, header = TRUE, na.strings = c("#DIV/0!", "")) [ , c(includeVar[1:(length(includeVar)-1)], "problem_id")]
+```
+
+
+** **
+
+**With the above logic the populations have been adjusted to only relevant variables (52) to be used for prediction.**
+
+**After exclusion of noise predictors the dimensions of downloaded Train and Test sets were pruned as follows respectively:**
+
+Train Set Downloaded Population from Data Source (number of observations, variables):    `r dim(trainDf)`
+
+Test Set Downloaded Population from Data Source (number of observations, variables):     `r dim(testDf)`
+
+** **
+
+** **
+
+###Prediction Study Design
+1. Separate the Training dataset into two separate populations for purposes of Training(60%), Validation/Testing(40%)
+
+2. For prediction purposes fit multiple models/methods. Fit models "gbm", "rpart" and RandomForest
+
+       (Use RandomForest package function to fit model, as it gave higher speed than 'rf' model in caret package)
+   
+     - Fit each model against a subset of the training population (60% observations)
+     - Validate each model with a subset of the remaining observations (40% observations) created as test set 
+     - Preprocess with Principal Components Analysis so that a weighted combination of predictors will be taken 
+     - Prepare PCA variables against the train and test populations and fit a RandomForest model with the PCA
+     - Compare difference in the Confidence Interval accuracy to guage best fit model
+
+
+
+3. Use the model with highest accuracy, to fit full training population and use it to score 20 test cases
+
+** **
+
+```{r partitionAndFitModel, echo = TRUE}
+
+#Partition the training dataset
+partitionIndex <- createDataPartition(trainDf$classe, p = 0.60, list = FALSE)
+trainPartition <- trainDf[partitionIndex,]
+testPartition <- trainDf[-partitionIndex,]
+predictVarCount <- ncol(trainPartition) - 1
+
+#Fit gbm model
+modelFit <- train(classe ~., data = trainPartition, method = "gbm", verbose = FALSE)
+predictOutcome <- predict(modelFit, newdata = testPartition)
+cmGbm <- confusionMatrix(predictOutcome, testPartition$classe)
+cmGbm$overall
+cmGbm
+
+#Fit rpart model
+modelFit <- train(classe ~., data = trainPartition, method = "rpart")
+predictOutcome <- predict(modelFit, newdata = testPartition)
+cmRpart <- confusionMatrix(predictOutcome, testPartition$classe)
+cmRpart$overall
+cmRpart
+
+#Fit RandomForest model
+fitRfModel <- randomForest(trainPartition$classe ~ ., data = trainPartition, importance = TRUE)
+predictRfOutcome <- predict(fitRfModel, testPartition)
+cmRf <- confusionMatrix(predictRfOutcome, testPartition$classe)
+cmRf$overall
+cmRf
+
+# Random Forests with PCA prep data
+pcaPrep <- preProcess(trainPartition[ , 1:predictVarCount], method = "pca")
+pcaTrainOutcome <- predict(pcaPrep, trainPartition[ , 1:predictVarCount])
+pcaTrainOutcome$classe <- trainPartition$classe
+pcaTestOutcome <- predict(pcaPrep, testPartition[ , 1:predictVarCount])
+pcaTestOutcome$classe <- testPartition$classe
+fitPcaRfModel <- randomForest(pcaTrainOutcome$classe ~ ., data = pcaTrainOutcome, importance = TRUE)
+pcaRfOutcome <- predict(fitPcaRfModel, pcaTestOutcome)
+cmRfPca <- confusionMatrix(pcaRfOutcome, pcaTestOutcome$classe)
+cmRfPca$overall
+cmRfPca
+```
+
+
+** **
+
+**All the above models were fitted and validated with the two sub-populations (train & test) created from the overall training population (19622 observations) provided from the data source.**
+
+
+**The dimensions of Train and Test sub-populations created out of Training population are as follows respectively:**
+
+
+Train Set sub-population (observations, number of variables):    `r dim(trainPartition)`
+
+Test Set sub-population (observations, number of variables):     `r dim(testPartition)`
+
+
+** **
+
+###Model Choice for Test Cases Prediction
+
+**As noted from above Confusion Matrix results of each model, the RandomForest model has been found to be fitting with highest accuracy. Thus fit a RandomForest model against the complete data population of 19622 rows from the full training dataset and use it for predicting the 20 test cases, which need to be part of the assignment of the project**
+
+
+** **
+
+```{r fitRfPredict, echo = TRUE, results = 'asis'}
+
+#Fit a RandomForest Model with the full training data set and use it for scoring with the test data to predict classe
+#Use the code provided in the project to write 20 text files for each prediction case
+fitRfModel <- randomForest(trainDf$classe ~ ., data = trainDf[, 1:predictVarCount], importance = TRUE)
+answers <- predict(fitRfModel, testDf)
+
+#Print answers for 20 test cases
+answers
+
+pml_write_files = function(x){
+n = length(x)
+for(i in 1:n){
+filename = paste0("problem_id_",i,".txt")
+write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+}
+}
+pml_write_files(answers)
+```
+
+
+** **
+
+
+##Inference
+
+ - RandomForest fit model (Accuracy : 0.992) gave slightly higher accuracy than the gbm fit model (Accuracy : 0.96). The accuracy loss is approximately 0.03%
+
+ - RandomForest fit model against PCA preprocessed dataset gave slightly lower accuracy (Accuracy : 0.97) compared to above (Accuracy : 0.992). The accuracy loss is approximately 0.02%
+ 
+ - The rpart method to fit the model gave the lowest accuracy out of the different models used
+
+ - RandomForest model is the best algorithm which offered the highest accuracy
+ 
+ - RandomForest model did not overfit and cross validation checks only yielded very low accuracy difference among RandomForest vs gbm vs RandomForest with PCA
+
+
+** **
